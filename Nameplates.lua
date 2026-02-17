@@ -611,23 +611,31 @@ end
 -- Update alpha for all nameplates based on target state
 -- Called on PLAYER_TARGET_CHANGED and when alpha settings change
 function ns.UpdateNameplateAlphas()
-    -- Only apply dimming when: has target AND setting is less than 100%
     local shouldDim = ns.currentTargetGUID and ns.c_nonTargetAlpha and ns.c_nonTargetAlpha < 1
     
     for nameplate in C_NamePlateManager.EnumerateActiveNamePlates() do
         local myPlate = nameplate.myPlate
-        if myPlate and not myPlate.isPlayer then  -- Skip personal bar
-            local alpha = 1.0  -- Default: full alpha
+        if myPlate and not myPlate.isPlayer then
+            local alpha = 1.0
             if shouldDim then
-                -- Use cached GUID to avoid garbage from UnitGUID() calls
                 local isTarget = myPlate.cachedGUID == ns.currentTargetGUID
                 if not isTarget then
                     alpha = ns.c_nonTargetAlpha
                 end
             end
-            -- Cache: only call SetAlpha when value changes
-            if myPlate._lastAlpha ~= alpha then
-                myPlate._lastAlpha = alpha
+            -- Combine with engine parent alpha (occlusion via nameplateIntersectOpacity)
+            local parentAlpha = nameplate:GetAlpha()
+            if parentAlpha < alpha then
+                alpha = parentAlpha
+                myPlate._occluded = true
+            elseif myPlate._occluded then
+                myPlate._occluded = nil
+                myPlate._deoccluding = true
+                alpha = myPlate:GetAlpha()
+            elseif myPlate._deoccluding then
+                myPlate._deoccluding = nil
+            end
+            if alpha ~= myPlate:GetAlpha() then
                 myPlate:SetAlpha(alpha)
             end
         end
@@ -2963,7 +2971,8 @@ function ns:UpdatePlateStyle(myPlate)
     end
     
     -- Update nameText and healthText positions when nameInHealthbar changes
-    if not myPlate.isPlayer and myPlate._lastNameInHealthbar ~= ns.c_nameInHealthbar then
+    -- Skip totem plates (they use custom layout, restored via _wasTotem on next non-totem use)
+    if not myPlate.isPlayer and not myPlate._wasTotem and myPlate._lastNameInHealthbar ~= ns.c_nameInHealthbar then
         myPlate.nameText:ClearAllPoints()
         if ns.c_nameInHealthbar then
             -- Reparent to hp so it renders above statusbar fill
@@ -4229,6 +4238,7 @@ groupFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
 groupFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 groupFrame:RegisterEvent("READY_CHECK")  -- Ready check started
 groupFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")  -- Zone changes (entering instances)
+groupFrame:RegisterEvent("PLAYER_ROLES_ASSIGNED")  -- Role changes (manual assignment, M+ groups)
 groupFrame:RegisterEvent("PLAYER_LOGOUT")  -- Cancel timers on logout
 groupFrame:RegisterEvent("PLAYER_DEAD")  -- Clear targeting me on death
 
@@ -4275,7 +4285,7 @@ groupFrame:SetScript("OnEvent", function(self, event, unit)
                 UpdateTargetingMeVisual(myPlate, false)
             end
         end
-    elseif event == "GROUP_ROSTER_UPDATE" or event == "PLAYER_ENTERING_WORLD" or event == "ZONE_CHANGED_NEW_AREA" then
+    elseif event == "GROUP_ROSTER_UPDATE" or event == "PLAYER_ENTERING_WORLD" or event == "ZONE_CHANGED_NEW_AREA" or event == "PLAYER_ROLES_ASSIGNED" then
         -- Cancel pending timers on zone change (they're no longer relevant)
         if event == "ZONE_CHANGED_NEW_AREA" or event == "PLAYER_ENTERING_WORLD" then
             CancelPendingTimers()
@@ -5065,6 +5075,13 @@ function ns:FullPlateUpdate(myPlate, unit)
             myPlate.totemIconFrame:Hide()
         end
         
+        -- Reparent nameText to myPlate for totem layout (may have been inside hp)
+        myPlate.nameText:SetParent(myPlate)
+        myPlate.nameText:SetDrawLayer("OVERLAY")
+        myPlate.nameText:SetJustifyH("CENTER")
+        myPlate.nameText:SetWidth(0)
+        myPlate.nameText:SetWordWrap(true)
+        
         -- Position elements based on what's visible
         myPlate.nameText:ClearAllPoints()
         if myPlate.totemIconFrame then
@@ -5392,9 +5409,25 @@ function ns:FullPlateUpdate(myPlate, unit)
         myPlate.hp:SetSize(ns.c_width, ns.c_hpHeight)
         myPlate.hp:ClearAllPoints()
         myPlate.hp:SetPoint("CENTER", myPlate, "CENTER", 0, -3)
-        -- Re-anchor nameText above hp (totem mode may have moved it)
+        -- Restore nameText respecting nameInHealthbar setting
         myPlate.nameText:ClearAllPoints()
-        myPlate.nameText:SetPoint("BOTTOM", myPlate.hp, "TOP", 0, 3)
+        if ns.c_nameInHealthbar then
+            myPlate.nameText:SetParent(myPlate.hp)
+            myPlate.nameText:SetDrawLayer("OVERLAY", 7)
+            PixelUtil.SetPoint(myPlate.nameText, "LEFT", myPlate.hp, "LEFT", 4, 0, 1, 1)
+            myPlate.nameText:SetJustifyH("LEFT")
+            myPlate.nameText:SetWidth(ns.c_width * 0.6)
+            myPlate.nameText:SetWordWrap(false)
+            myPlate.nameText:SetNonSpaceWrap(false)
+        else
+            myPlate.nameText:SetParent(myPlate)
+            myPlate.nameText:SetDrawLayer("OVERLAY")
+            PixelUtil.SetPoint(myPlate.nameText, "BOTTOM", myPlate.hp, "TOP", 0, 3, 1, 1)
+            myPlate.nameText:SetJustifyH("CENTER")
+            myPlate.nameText:SetWidth(0)
+            myPlate.nameText:SetWordWrap(true)
+        end
+        myPlate._lastNameInHealthbar = ns.c_nameInHealthbar
         -- Re-anchor castbar to hp (totem fallback may have anchored to myPlate:BOTTOM)
         if myPlate.castbar then
             myPlate.castbar:ClearAllPoints()
@@ -5411,6 +5444,45 @@ function ns:FullPlateUpdate(myPlate, unit)
         myPlate._lastHpHeight = nil
         myPlate._lastCastWidth = nil
     end
+    
+    -- Enforce nameText parent/anchor every FullPlateUpdate (plate may have been recycled
+    -- from personal bar, totem, or another state that moved nameText)
+    if myPlate._lastNameInHealthbar ~= ns.c_nameInHealthbar then
+        myPlate.nameText:ClearAllPoints()
+        if ns.c_nameInHealthbar then
+            myPlate.nameText:SetParent(myPlate.hp)
+            myPlate.nameText:SetDrawLayer("OVERLAY", 7)
+            PixelUtil.SetPoint(myPlate.nameText, "LEFT", myPlate.hp, "LEFT", 4, 0, 1, 1)
+            myPlate.nameText:SetJustifyH("LEFT")
+            myPlate.nameText:SetWidth(ns.c_width * 0.6)
+            myPlate.nameText:SetWordWrap(false)
+            myPlate.nameText:SetNonSpaceWrap(false)
+        else
+            myPlate.nameText:SetParent(myPlate)
+            myPlate.nameText:SetDrawLayer("OVERLAY")
+            PixelUtil.SetPoint(myPlate.nameText, "BOTTOM", myPlate.hp, "TOP", 0, 3, 1, 1)
+            myPlate.nameText:SetJustifyH("CENTER")
+            myPlate.nameText:SetWidth(0)
+            myPlate.nameText:SetWordWrap(true)
+        end
+        myPlate._lastNameInHealthbar = ns.c_nameInHealthbar
+        -- Also fix healthText alignment
+        if myPlate.healthText then
+            myPlate.healthText:ClearAllPoints()
+            if ns.c_nameInHealthbar then
+                PixelUtil.SetPoint(myPlate.healthText, "RIGHT", myPlate.hp, "RIGHT", -4, 0, 1, 1)
+                myPlate.healthText:SetJustifyH("RIGHT")
+            else
+                myPlate.healthText:SetAllPoints(myPlate.hp)
+                myPlate.healthText:SetJustifyH("CENTER")
+            end
+        end
+        -- Reset level text position cache so it repositions
+        if myPlate.levelText then
+            myPlate.levelText._lastPositionKey = nil
+        end
+    end
+    
     myPlate.hp:Show()
     if myPlate.totemIconFrame then
         myPlate.totemIconFrame:Hide()
