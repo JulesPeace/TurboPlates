@@ -84,25 +84,30 @@ do
     local GetTime = GetTime
     
     local function UpdateAlphaAndLevel(nameplate, parent)
-        -- Note: 'nameplate' here is actually myPlate (our TurboPlates frame), not the base frame
-        -- 'parent' is the Blizzard base nameplate frame
-        -- Alpha override: Always control alpha for non-personal nameplates
-        -- This prevents the game engine from dimming plates (CVars don't exist in this client)
         local a
         local isPersonal = nameplate.isPlayer
         if not isPersonal then
-            -- Manual alpha control for all non-personal nameplates
             if ns.currentTargetGUID and ns.c_nonTargetAlpha and ns.c_nonTargetAlpha < 1 then
-                -- Only dim when: has target AND setting is less than 100%
-                -- Use cached GUID to avoid garbage from UnitGUID() calls
                 local isTarget = nameplate.cachedGUID == ns.currentTargetGUID
                 a = isTarget and 1.0 or ns.c_nonTargetAlpha
             else
-                -- No target OR setting is 100%: all nameplates at full alpha
                 a = 1.0
             end
+            -- Combine with engine parent alpha (occlusion via nameplateIntersectOpacity)
+            -- De-occlusion is buffered by 1 frame to filter engine raycast noise
+            local parentAlpha = parent:GetAlpha()
+            if parentAlpha < a then
+                a = parentAlpha
+                nameplate._occluded = true
+            elseif nameplate._occluded then
+                -- Was occluded, now visible: hold occluded alpha 1 more frame
+                nameplate._occluded = nil
+                nameplate._deoccluding = true
+                a = nameplate:GetAlpha()
+            elseif nameplate._deoccluding then
+                nameplate._deoccluding = nil
+            end
         else
-            -- Personal bar: inherit from parent
             a = parent:GetAlpha()
         end
         
@@ -129,11 +134,6 @@ do
     
     local function OnSizeChangedHandler(self, newX, newY)
         SmoothMoveNameplate(self.nameplate, newX, newY)
-        
-        -- Defer alpha/level updates until plate stops moving to reduce shimmer
-        if C_NamePlateManager.IsNamePlateMoving(self.parent) then
-            return
-        end
         UpdateAlphaAndLevel(self.nameplate, self.parent)
     end
     
@@ -168,6 +168,8 @@ do
     
     local function InitializeMovementCallback(movementCallback)
         local nameplate = movementCallback.nameplate
+        local wasRemoved = not nameplate:IsShown()
+        
         nameplate:SetParent(WorldFrame)
         nameplate:ClearAllPoints()
         
@@ -182,6 +184,14 @@ do
         -- PLAYER_TARGET_CHANGED: Sync alpha immediately when target changes
         movementCallback:RegisterEvent("PLAYER_TARGET_CHANGED")
         movementCallback:SetScript("OnEvent", OnEventHandler)
+        
+        if wasRemoved then
+            -- Plate was removed during deferred init — ensure it stays hidden
+            nameplate:Hide()
+        else
+            -- Set correct alpha immediately (plate was hidden during deferred init)
+            UpdateAlphaAndLevel(nameplate, movementCallback.parent)
+        end
     end
     
     C_NamePlateManager.ApplyFPSIncrease = function(nameplate)
@@ -198,7 +208,12 @@ do
             nameplate:Hide()
         end)
         hooksecurefunc(nameplateFrame, "Show", function()
-            nameplate:Show()
+            -- Only show if the Blizzard frame has an active unit assigned.
+            -- Engine reuses frames: Show fires before NAME_PLATE_UNIT_ADDED
+            -- is processed, which would show myPlate at a stale position.
+            if nameplateFrame._unit then
+                nameplate:Show()
+            end
         end)
         
         local movementCallback = CreateFrame("Frame", nil, nameplate)
@@ -209,6 +224,9 @@ do
         movementCallback.parent = nameplateFrame
         movementCallback:SetPoint("BOTTOMLEFT", WorldFrame)
         movementCallback:SetPoint("TOPRIGHT", nameplateFrame, "CENTER")
+        
+        -- Hide during deferred init to prevent 1-frame flash
+        nameplate:SetAlpha(0)
         
         -- Defer initialization to next frame (using pre-defined function, not inline closure)
         local callback = movementCallback
@@ -453,8 +471,8 @@ Core:SetScript("OnEvent", function(self, event, ...)
             if ns.c_stackingEnabled then
                 C_CVar.Set("nameplateAllowOverlap", 1)
             end
-            -- Note: Alpha CVars (nameplateNotSelectedAlpha, nameplateMinAlpha) don't exist
-            -- in Ascension client. Alpha is handled manually in UpdateAlphaAndLevel().
+            -- Note: nameplateNotSelectedAlpha/nameplateMinAlpha don't exist in Ascension.
+            -- Engine occlusion (nameplateIntersectOpacity) is respected via min(a, parent:GetAlpha()).
         end
         
         -- Enable nameplate resizing so Clickable Width/Height sliders work
@@ -924,6 +942,17 @@ local function OnNamePlateAdded(_, unit, nameplate)
             nameplate.myPlate.additionalPowerBar:Hide()
         end
         
+        -- Pre-sync position for recycled plates (already on WorldFrame)
+        -- to prevent 1-frame flash at the old world position
+        local mc = nameplate.myPlate.movementCallback
+        if mc and nameplate.myPlate:GetParent() == WorldFrame then
+            local x, y = mc:GetSize()
+            if x > 0 and y > 0 then
+                nameplate.myPlate:SetPoint("CENTER", WorldFrame, "BOTTOMLEFT", x, y)
+                nameplate.myPlate.x, nameplate.myPlate.y = x, y
+            end
+        end
+        
         nameplate.myPlate:Show()
         ns.unitToPlate[unit] = nameplate.myPlate
         
@@ -1078,6 +1107,11 @@ local function OnNamePlateRemoved(_, unit, nameplate)
             -- Clear initialized flag so plate gets re-initialized for next unit
             nameplate.myPlate._initialized = false
             nameplate.myPlate._lastUnit = nil
+            -- Reset nameInHealthbar cache so recycled plate re-applies positioning
+            nameplate.myPlate._lastNameInHealthbar = nil
+            -- Clear occlusion buffer flags (prevent stale de-occlusion on recycled plates)
+            nameplate.myPlate._occluded = nil
+            nameplate.myPlate._deoccluding = nil
             -- Clear absorb cache and hide absorb/heal textures to prevent visual artifacts
             nameplate.myPlate._lastAbsorb = nil
             nameplate.myPlate._lastAbsorbHealth = nil
