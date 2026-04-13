@@ -3553,7 +3553,7 @@ local function GetVigilanceScanInterval() return THROTTLE.vigilance * (ns.c_thro
 -- Check if a unit has a tank aura active
 local function HasTankAura(unit)
     for i = 1, 40 do
-        local _, _, _, _, _, _, _, _, _, spellId = UnitBuff(unit, i)
+        local _, _, _, _, _, _, _, _, _, _, spellId = UnitBuff(unit, i)
         if not spellId then break end
         if TANK_AURAS[spellId] then return true end
     end
