@@ -3553,7 +3553,7 @@ local function GetVigilanceScanInterval() return THROTTLE.vigilance * (ns.c_thro
 -- Check if a unit has a tank aura active
 local function HasTankAura(unit)
     for i = 1, 40 do
-        local _, _, _, _, _, _, _, _, _, spellId = UnitBuff(unit, i)
+        local _, _, _, _, _, _, _, _, _, _, spellId = UnitBuff(unit, i)
         if not spellId then break end
         if TANK_AURAS[spellId] then return true end
     end
@@ -3578,7 +3578,7 @@ local function FindVigilanceCaster(forceRescan)
     
     local function ScanUnit(unit)
         for i = 1, 40 do
-            local _, _, _, _, _, _, _, caster, _, spellId = UnitBuff(unit, i)
+            local _, _, _, _, _, _, _, caster, _, _, spellId = UnitBuff(unit, i)
             if not spellId then return nil end
             if spellId == VIGILANCE_SPELL_ID and caster then
                 return UnitName(caster)
