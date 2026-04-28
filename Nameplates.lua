@@ -3767,8 +3767,15 @@ local function RefreshGroupRoles(forceUpdate)
         
         -- Include player in group roles
         local playerGUID = UnitGUID("player")
-        if playerGUID then 
-            group.roles[playerGUID] = GetUnitRole("player")
+        if playerGUID then
+            --group.roles[playerGUID] here was set in line 3720 and was overwritten if player was tank and not in LFG tool group with Roles
+            local playerRole = GetUnitRole("player")
+			-- Sync with UpdatePlayerTankStatus logic
+            if group.playerIsTank then
+				playerRole = "TANK"
+			end
+
+			group.roles[playerGUID] = playerRole
             -- Check if player is Vigilance caster
             if vigilanceCaster and UnitName("player") == vigilanceCaster then
                 group.roles[playerGUID] = "TANK"
